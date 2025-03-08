@@ -58,8 +58,8 @@ async def save_face(
 
         # Save to Database (Including CreatedBy )
         query = """
-        INSERT INTO UserFaces (UserID, Embedding, ImagePath, CreatedBy,)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO UserFaces (UserID, Embedding, ImagePath, CreatedBy)
+        VALUES (?, ?, ?, ?)
         """
         params = (user_id, embedding_str, image_path, created_by)
 
