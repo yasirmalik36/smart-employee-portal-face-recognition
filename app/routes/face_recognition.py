@@ -1,33 +1,17 @@
 import os
 import shutil
 import json
+from datetime import datetime
+
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
-from app.services.database import execute_query, fetch_all
+from app.services.database import execute_query, fetch_all, execute_query_with_output
 from deepface import DeepFace
 
 # Define the storage directory
 IMAGE_FOLDER = "images/faces/"
-
 # Ensure the folder exists
 os.makedirs(IMAGE_FOLDER, exist_ok=True)
-
 router = APIRouter(prefix="/face-recognition", tags=["Face Recognition"])
-
-
-# ✅ Function to Save Image
-def save_face_image(user_id: int, image_file: UploadFile) -> str:
-    """Saves an uploaded face image to 'images/faces/user_{user_id}/' and returns its path."""
-    user_folder = os.path.join(IMAGE_FOLDER, f"user_{user_id}")
-    os.makedirs(user_folder, exist_ok=True)  # Create folder if not exists
-
-    image_path = os.path.join(user_folder, image_file.filename)
-
-    with open(image_path, "wb") as buffer:
-        shutil.copyfileobj(image_file.file, buffer)
-
-    return image_path
-
-
 # ✅ Function to Extract Face Embedding
 def extract_face_embedding(image_path: str) -> list:
     """Extracts face embedding using DeepFace and returns it as a list."""
@@ -38,10 +22,27 @@ def extract_face_embedding(image_path: str) -> list:
         raise HTTPException(status_code=500, detail=f"Error extracting face embedding: {str(e)}")
 
 
-# ✅ API to Save Face Image & Embedding
+# ✅ Function to Save or Update Image
+def save_face_image(employee_id: int, image_file: UploadFile, created_by: str) -> str:
+    """Saves or updates an uploaded face image for a specific user and returns its path."""
+    # Define the user's folder path
+    employee_folder = os.path.join(IMAGE_FOLDER, f"employee_{employee_id}")
+    os.makedirs(employee_folder, exist_ok=True)  # Create folder if not exists
+
+    # Define the full image path
+    image_path = os.path.join(employee_folder, image_file.filename)
+    image_path = os.path.normpath(image_path)  # Normalize the file path to handle OS-specific issues
+
+    # Check if the file exists
+    with open(image_path, "wb") as buffer:
+        shutil.copyfileobj(image_file.file, buffer)
+
+    return image_path
+
+# API endpoint to save face image and embedding
 @router.post("/save-face")
 async def save_face(
-    user_id: int = Form(...),
+    employee_id: int = Form(...),
     created_by: str = Form(...),
     image_file: UploadFile = File(...)
 ):
@@ -49,23 +50,16 @@ async def save_face(
     Uploads a face image, extracts the embedding, and stores them in SQL Server.
     """
     try:
-        # Save Image
-        image_path = save_face_image(user_id, image_file)
-
-        # Extract Embedding
+        image_path = save_face_image(employee_id, image_file, created_by)
         embedding = extract_face_embedding(image_path)
-        embedding_str = json.dumps(embedding)
+        embedding_str = ",".join(map(str, embedding))
+        modified_by = created_by
 
-        # Save to Database (Including CreatedBy )
-        query = """
-        INSERT INTO UserFaces (UserID, Embedding, ImagePath, CreatedBy)
-        VALUES (?, ?, ?, ?)
-        """
-        params = (user_id, embedding_str, image_path, created_by)
+        query = "{CALL SaveOrUpdateFaceImage(?, ?, ?, ?, ?, ?, ?, ?)}"
+        params = (employee_id, embedding_str, image_path, created_by, modified_by, None, None, None)
+        result = execute_query_with_output(query, params)
 
-        execute_query(query, params)
-
-        return {"code":"00","message": "Face saved successfully", "image_path": image_path}
+        return result
 
     except HTTPException as he:
         raise he
@@ -86,18 +80,18 @@ async def verify_face(image_file: UploadFile = File(...)):
             shutil.copyfileobj(image_file.file, buffer)
 
         # Fetch All Stored Faces
-        query = "SELECT UserID, ImagePath FROM UserFaces"
+        query = "SELECT EmployeeID, ImagePath FROM EmployeeFaces where IsActive=1 and IsDeleted = 0"
         face_db = fetch_all(query)
 
         if not face_db:
             raise HTTPException(status_code=404, detail="No face data found")
 
         # Compare with Stored Faces
-        for stored_user_id, stored_image_path in face_db:
+        for store_employee_id, stored_image_path in face_db:
             result = DeepFace.verify(img1_path=temp_image_path, img2_path=stored_image_path, model_name="Facenet")
 
             if result["verified"]:
-                return { "code":"00","user_id": stored_user_id, "message": "Face Matched"}
+                return { "code":"00","employee_id": store_employee_id, "message": "Face Matched"}
 
         return {"code":"01","message": "No Match Found"}
 
