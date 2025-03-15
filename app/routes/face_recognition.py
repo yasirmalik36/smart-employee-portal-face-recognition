@@ -2,7 +2,9 @@ import os
 import shutil
 import json
 from datetime import datetime
-
+from app.services.liveness import check_liveness
+import cv2
+import numpy as np
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 from app.services.database import execute_query, fetch_all, execute_query_with_output
 from deepface import DeepFace
@@ -99,3 +101,23 @@ async def verify_face(image_file: UploadFile = File(...)):
         raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error during face verification: {str(e)}")
+
+@router.post("/check-liveness/")
+async def check_liveness_endpoint(file: UploadFile = File(...)):
+    try:
+        # Read image bytes
+        image_bytes = await file.read()
+
+        # Convert to NumPy array
+        nparr = np.frombuffer(image_bytes, np.uint8)
+
+        # Decode image
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        # Call the liveness detection function
+        result = check_liveness(image)
+
+        return result
+
+    except Exception as e:
+        return {"error": str(e)}
