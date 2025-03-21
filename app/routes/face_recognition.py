@@ -1,123 +1,193 @@
 import os
 import shutil
-import json
-from datetime import datetime
-from app.services.liveness import check_liveness
-import cv2
 import numpy as np
+import cv2
+import faiss
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
-from app.services.database import execute_query, fetch_all, execute_query_with_output
 from deepface import DeepFace
+from app.services.database import execute_query_with_output, fetch_all, delete_record
+from app.services.liveness import check_liveness
 
 # Define the storage directory
 IMAGE_FOLDER = "images/faces/"
-# Ensure the folder exists
 os.makedirs(IMAGE_FOLDER, exist_ok=True)
+
+# Initialize ArcFace model
+model = DeepFace.build_model("ArcFace")
+
+# Initialize FAISS Index
+embedding_dim = 512  # ArcFace output dimension
+faiss_index = faiss.IndexFlatL2(embedding_dim)
+embeddings_dict = {}  # Mapping FAISS index → employee_id
+
 router = APIRouter(prefix="/face-recognition", tags=["Face Recognition"])
-# ✅ Function to Extract Face Embedding
-def extract_face_embedding(image_path: str) -> list:
-    """Extracts face embedding using DeepFace and returns it as a list."""
+
+# Load existing embeddings
+def load_existing_embeddings():
+    global faiss_index, embeddings_dict
+    faiss_index = faiss.IndexFlatL2(embedding_dim)  # Reset FAISS
+    embeddings_dict.clear()  # Clear existing mappings
+
+    query = "SELECT EmployeeID, Embedding FROM EmployeeFaces WHERE IsActive=1 AND IsDeleted=0"
+    face_db = fetch_all(query)
+
+    if not face_db:
+        print("ℹ️ No stored face data found in the database.")
+        return
+
+    embeddings = []
+    employee_ids = []
+
+    for employee_id, embedding_str in face_db:
+        embedding = np.array([float(x) for x in embedding_str.split(',')], dtype=np.float32)
+        embedding /= np.linalg.norm(embedding)  # Normalize embedding
+        embeddings.append(embedding)
+        employee_ids.append(employee_id)
+
+    if embeddings:
+        faiss_index.add(np.array(embeddings, dtype=np.float32))  # Add all at once
+        for idx, emp_id in enumerate(employee_ids):
+            embeddings_dict[idx] = emp_id
+
+    print(f"✅ Loaded {faiss_index.ntotal} embeddings into FAISS.")
+
+# Load embeddings on startup
+load_existing_embeddings()
+
+# Extract face embedding from an image
+def extract_face_embedding(image_path: str) -> np.ndarray:
     try:
-        embedding = DeepFace.represent(img_path=image_path, model_name="Facenet")[0]["embedding"]
-        return embedding
+        print(f"[INFO] Extracting face embedding from: {image_path}")
+        embedding = DeepFace.represent(img_path=image_path, model_name="ArcFace")[0]["embedding"]
+        embedding = np.array(embedding, dtype=np.float32)
+        return embedding / np.linalg.norm(embedding)  # Normalize the embedding
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error extracting face embedding: {str(e)}")
+        print(f"[ERROR] Face embedding extraction failed: {str(e)}")
+        return None
 
-
-# ✅ Function to Save or Update Image
-def save_face_image(employee_id: int, image_file: UploadFile, created_by: str) -> str:
-    """Saves or updates an uploaded face image for a specific user and returns its path."""
-    # Define the user's folder path
+# Save face image to the specified folder
+def save_face_image(employee_id: int, image_file: UploadFile) -> str:
     employee_folder = os.path.join(IMAGE_FOLDER, f"employee_{employee_id}")
-    os.makedirs(employee_folder, exist_ok=True)  # Create folder if not exists
-
-    # Define the full image path
+    os.makedirs(employee_folder, exist_ok=True)
     image_path = os.path.join(employee_folder, image_file.filename)
-    image_path = os.path.normpath(image_path)  # Normalize the file path to handle OS-specific issues
-
-    # Check if the file exists
     with open(image_path, "wb") as buffer:
         shutil.copyfileobj(image_file.file, buffer)
-
     return image_path
 
-# API endpoint to save face image and embedding
+# Save face image and embedding to the database and FAISS index
 @router.post("/save-face")
-async def save_face(
-    employee_id: int = Form(...),
-    created_by: str = Form(...),
-    image_file: UploadFile = File(...)
-):
-    """
-    Uploads a face image, extracts the embedding, and stores them in SQL Server.
-    """
+async def save_face(employee_id: int = Form(...), created_by: str = Form(...), image_file: UploadFile = File(...)):
     try:
-        image_path = save_face_image(employee_id, image_file, created_by)
+        image_path = save_face_image(employee_id, image_file)
         embedding = extract_face_embedding(image_path)
-        embedding_str = ",".join(map(str, embedding))
-        modified_by = created_by
 
+        if embedding is None:
+            return {"code": "02", "message": "Failure", "description": "No face detected in the uploaded image. Please upload a clear face photo."}
+
+        faiss_index.add(np.array([embedding], dtype=np.float32))
+        index_position = faiss_index.ntotal - 1
+        embeddings_dict[index_position] = employee_id
+
+        embedding_str = ",".join(map(str, embedding.tolist()))
         query = "{CALL SaveOrUpdateFaceImage(?, ?, ?, ?, ?, ?, ?, ?)}"
-        params = (employee_id, embedding_str, image_path, created_by, modified_by, None, None, None)
+        params = (employee_id, embedding_str, image_path, created_by, created_by, None, None, None)
         result = execute_query_with_output(query, params)
+        load_existing_embeddings()
 
         return result
-
-    except HTTPException as he:
-        raise he
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to save face: {str(e)}")
+        return {"code": "500", "message": "Failure", "description": f"Failed to save face: {str(e)}"}
 
-
-# ✅ API to Verify Face
+# Verify face by matching the uploaded image with existing database
 @router.post("/verify-face")
 async def verify_face(image_file: UploadFile = File(...)):
-    """
-    Verifies a face by comparing it against stored faces.
-    """
     try:
-        # Save Temp Image for Verification
         temp_image_path = os.path.join(IMAGE_FOLDER, "temp.jpg")
         with open(temp_image_path, "wb") as buffer:
             shutil.copyfileobj(image_file.file, buffer)
 
-        # Fetch All Stored Faces
-        query = "SELECT EmployeeID, ImagePath FROM EmployeeFaces where IsActive=1 and IsDeleted = 0"
+        # Extract face embedding
+        embedding = extract_face_embedding(temp_image_path)
+        if embedding is None:
+            return {"code": "02", "message": "Failure", "description": "Face not recognized. Please try again later"}
+
+        if faiss_index.ntotal > 0:
+            # Convert embedding to numpy array
+            embedding_array = np.array([embedding], dtype=np.float32)
+
+            # FAISS search
+            D, I = faiss_index.search(embedding_array, 1)
+
+            if D[0][0] < 1.2:
+                matched_index = I[0][0]
+                employee_id = embeddings_dict.get(matched_index)
+                if employee_id is not None:
+                    return {
+                        "code": "00",
+                        "message": "Success",
+                        "employee_id": employee_id,
+                        "description": "Face Matched (FAISS)"
+                    }
+
+        # Fetch stored employee faces from DB
+        query = "SELECT EmployeeID, ImagePath FROM EmployeeFaces WHERE IsActive=1 AND IsDeleted=0"
         face_db = fetch_all(query)
 
         if not face_db:
-            raise HTTPException(status_code=404, detail="No face data found")
+            return {"code": "03", "message": "Failure", "description": "No face data found in the database"}
 
-        # Compare with Stored Faces
+        # Verify face with DeepFace
         for store_employee_id, stored_image_path in face_db:
-            result = DeepFace.verify(img1_path=temp_image_path, img2_path=stored_image_path, model_name="Facenet")
+            try:
+                result = DeepFace.verify(img1_path=temp_image_path, img2_path=stored_image_path, model_name="Facenet")
+                if result.get("verified"):
+                    return {
+                        "code": "00",
+                        "message": "Success",
+                        "employee_id": store_employee_id,
+                        "description": "Face Matched (DeepFace)"
+                    }
+            except Exception as deepface_error:
+                print(f"DeepFace error: {deepface_error}")
 
-            if result["verified"]:
-                return { "code":"00","employee_id": store_employee_id, "message": "Face Matched"}
+        return {"code": "01", "message": "Failure", "description": "No Match Found"}
 
-        return {"code":"01","message": "No Match Found"}
-
-    except HTTPException as he:
-        raise he
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error during face verification: {str(e)}")
+        return {"code": "500", "message": "Failure", "description": f"Error during face verification: {str(e)}"}
 
+# Check liveness to verify the person is real
 @router.post("/check-liveness/")
 async def check_liveness_endpoint(file: UploadFile = File(...)):
     try:
-        # Read image bytes
         image_bytes = await file.read()
-
-        # Convert to NumPy array
         nparr = np.frombuffer(image_bytes, np.uint8)
-
-        # Decode image
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-        # Call the liveness detection function
         result = check_liveness(image)
-
         return result
-
     except Exception as e:
         return {"error": str(e)}
+
+# Delete face data from database and filesystem
+@router.delete("/delete-face/{employee_id}")
+async def delete_face(employee_id: int):
+    try:
+        query = "SELECT FaceID, ImagePath FROM EmployeeFaces WHERE EmployeeID=? AND IsDeleted=0 AND IsActive=1"
+        result = fetch_all(query, (employee_id,))
+
+        if not result:
+            return {"code": "404", "message": "Failure", "description": "Face not found for the given Employee ID"}
+
+        face_id, image_path = result[0]
+        delete_record("EmployeeFaces", "EmployeeID=? AND IsDeleted=0 AND IsActive=1", (employee_id,))
+
+        if image_path and os.path.exists(image_path):
+            os.remove(image_path)
+            employee_folder = os.path.dirname(image_path)
+            if os.path.exists(employee_folder) and not os.listdir(employee_folder):
+                os.rmdir(employee_folder)
+        load_existing_embeddings()
+
+        return {"code": "00", "message": "Success", "description": "Face deleted successfully"}
+
+    except Exception as e:
+        return {"code": "500", "message": "Failure", "description": f"Error deleting face: {str(e)}"}
