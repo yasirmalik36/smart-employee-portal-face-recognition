@@ -70,7 +70,7 @@ def execute_query_with_output(query, params):
             return {
                 'Code': result[0],  # Access the first element (Code)
                 'Message': result[1], # Access the second element (Message)
-                'Desc': result[2]    # Access the third element (Desc)
+                'Description': result[2]    # Access the third element (Desc)
             }
         else:
             return None
@@ -136,7 +136,7 @@ def execute_query_with_output(query, params):
             return {
                 'Code': result[0],  # Access the first element (Code)
                 'Message': result[1], # Access the second element (Message)
-                'Desc': result[2]    # Access the third element (Desc)
+                'Description': result[2]    # Access the third element (Desc)
             }
         else:
             return None
