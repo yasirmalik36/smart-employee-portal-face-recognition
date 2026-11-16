@@ -1,218 +1,104 @@
 # 👁️ Smart Employee Portal — Face Recognition Service
 
-> Production-grade **biometric attendance** microservice achieving **98%+ identity verification accuracy**. Built with Python, OpenCV, and Flask — integrates seamlessly with the Smart Employee Portal backend via REST API.
+> Biometric attendance microservice for the **Smart Employee Portal**. Built with **FastAPI**, **DeepFace (ArcFace / FaceNet)**, **FAISS** and **OpenCV**, it enrols employee faces, verifies them at check-in and runs a basic liveness check — and is called by the [.NET backend](https://github.com/yasirmalik36/smart-employee-portal-backend) over REST.
 
 [![Python](https://img.shields.io/badge/Python_3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![Flask](https://img.shields.io/badge/Flask-000000?style=for-the-badge&logo=flask&logoColor=white)](https://flask.palletsprojects.com)
-[![OpenCV](https://img.shields.io/badge/OpenCV-27338e?style=for-the-badge&logo=OpenCV&logoColor=white)](https://opencv.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![OpenCV](https://img.shields.io/badge/OpenCV-5C3EE8?style=for-the-badge&logo=opencv&logoColor=white)](https://opencv.org)
+[![FAISS](https://img.shields.io/badge/FAISS-00599C?style=for-the-badge)](https://faiss.ai)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 
 ---
 
-## ✨ Features
+## ✨ What it does
 
-- 🎯 **98%+ Accuracy** — Multi-model face verification pipeline with confidence scoring
-- ⚡ **Real-time Processing** — Sub-500ms verification from image capture to response
-- 🔐 **Liveness Detection** — Anti-spoofing to prevent photo-based bypass attempts
-- 👤 **Employee Enrollment** — Register face embeddings from multiple angles for robustness
-- 📸 **Multi-frame Verification** — Averages across 3 frames for higher reliability
-- 🏗️ **REST API** — Simple JSON endpoints, integrates with any backend
-- 📊 **Confidence Scores** — Returns match confidence, not just binary pass/fail
-- 🗄️ **Embedding Storage** — Efficient face vector storage with fast cosine similarity search
+| Capability | How it works |
+|---|---|
+| 👤 **Enrolment** — `POST /face-recognition/save-face` | Detects a face in the uploaded photo, stores the image and its embedding against an `EmployeeID` in SQL Server |
+| ✅ **Verification** — `POST /face-recognition/verify-face` | Embeds the probe image with **ArcFace** (512-d), searches a **FAISS** `IndexFlatL2` of enrolled faces, then falls back to **DeepFace.verify (FaceNet)** against stored images |
+| 🛡️ **Liveness check** — `POST /face-recognition/check-liveness/` | Face detection with **dlib** plus optical-flow motion analysis in **OpenCV** to reject static photos |
+| 🗑️ **Removal** — `DELETE /face-recognition/delete-face/{employee_id}` | Deletes an employee's face record and rebuilds the index |
+| 📖 **Docs** | Interactive Swagger UI at `/docs` (the root URL redirects there) |
+
+Responses use the portal's shared envelope: `{ "code": "00", "message": "Success", "description": "..." }`.
 
 ---
 
 ## 🏗️ Architecture
 
+```mermaid
+flowchart LR
+    UI[Angular 17 UI<br/>webcam capture] --> API[.NET 8 API<br/>SmartEmpAPI]
+    API -->|REST, multipart image| FR[FastAPI<br/>face-recognition service]
+    FR --> DF[DeepFace<br/>ArcFace / FaceNet]
+    FR --> IX[(FAISS index<br/>in memory)]
+    FR --> CV[OpenCV + dlib<br/>liveness]
+    FR --> DB[(SQL Server<br/>EmployeeFaces)]
 ```
-┌─────────────────┐    HTTP POST     ┌──────────────────────────┐
-│  Angular 17 UI  │ ─────────────▶  │   Flask REST API         │
-│  (Webcam Feed)  │                  │                          │
-└─────────────────┘                  │  ┌─────────────────────┐ │
-                                     │  │  Face Detection     │ │
-┌─────────────────┐    HTTP POST     │  │  (Haar Cascade /    │ │
-│  .NET Core API  │ ─────────────▶  │  │   MTCNN)            │ │
-│  (Attendance)   │                  │  └────────┬────────────┘ │
-└─────────────────┘                  │           │              │
-                                     │  ┌────────▼────────────┐ │
-                                     │  │  Embedding Extract  │ │
-                                     │  │  (FaceNet / ArcFace)│ │
-                                     │  └────────┬────────────┘ │
-                                     │           │              │
-                                     │  ┌────────▼────────────┐ │
-                                     │  │  Cosine Similarity  │ │
-                                     │  │  + Liveness Check   │ │
-                                     │  └────────┬────────────┘ │
-                                     │           │              │
-                                     │  ┌────────▼────────────┐ │
-                                     │  │  JSON Response      │ │
-                                     │  │  {match, confidence}│ │
-                                     │  └─────────────────────┘ │
-                                     └──────────────────────────┘
+
+```
+app/
+├── main.py                 # FastAPI app, mounts the router, / → /docs
+├── config.py               # Settings from environment variables
+├── routes/face_recognition.py
+├── services/
+│   ├── database.py         # pyodbc helpers (parameterised queries)
+│   ├── face_processing.py
+│   └── liveness.py         # dlib + optical-flow liveness check
+└── utils/
+run.py                      # uvicorn entry point (127.0.0.1:8000)
 ```
 
 ---
 
-## 🔧 Tech Stack
-
-| Component | Technology |
-|-----------|-----------|
-| API Framework | Flask 3.x |
-| Computer Vision | OpenCV 4.x |
-| Face Detection | MTCNN / Haar Cascade |
-| Face Embeddings | FaceNet / DeepFace |
-| Similarity Search | NumPy cosine similarity |
-| Image Processing | Pillow |
-| Storage | JSON embeddings store (SQLite optional) |
-| Deployment | Docker / Azure App Service |
-
----
-
-## 🚀 Getting Started
+## 🚀 Getting started
 
 ### Prerequisites
 
 - Python 3.10+
-- pip / virtualenv
-- Webcam or image source for testing
+- SQL Server with the `SMART_EMP` database and an `EmployeeFaces` table (schema not included in this repo)
+- [Microsoft ODBC Driver 18 for SQL Server](https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server)
+- CMake and a C++ compiler (required to build `dlib`)
 
-### 1. Clone the Repository
+### Install and run
 
 ```bash
 git clone https://github.com/yasirmalik36/smart-employee-portal-face-recognition.git
 cd smart-employee-portal-face-recognition
-```
 
-### 2. Create Virtual Environment
-
-```bash
-python -m venv venv
-
-# Windows
-venv\Scripts\activate
-
-# macOS / Linux
-source venv/bin/activate
-```
-
-### 3. Install Dependencies
-
-```bash
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+
+export DB_CONNECTION_STRING="DRIVER={ODBC Driver 18 for SQL Server};SERVER=localhost;DATABASE=SMART_EMP;Trusted_Connection=yes;TrustServerCertificate=yes"
+python run.py
 ```
 
-### 4. Run the Service
+The service starts at **http://127.0.0.1:8000** — open `/docs` for Swagger UI. The first start downloads the DeepFace model weights.
 
-```bash
-python app.py
-```
+### Configuration
 
-Service runs at `http://localhost:5000`
+| Variable | Default | Purpose |
+|---|---|---|
+| `DB_CONNECTION_STRING` | local SQL Server, `SMART_EMP` | pyodbc connection string |
+
+Enrolled images are written to `images/faces/` at runtime. That folder is git-ignored: **face images are biometric personal data and must never be committed.**
 
 ---
 
-## 📡 API Endpoints
+## 🔗 Related repositories
 
-### Enroll Employee Face
-```http
-POST /api/enroll
-Content-Type: application/json
-
-{
-  "employee_id": "EMP001",
-  "images": ["base64_image_1", "base64_image_2", "base64_image_3"]
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "employee_id": "EMP001",
-  "embeddings_stored": 3,
-  "message": "Face enrolled successfully"
-}
-```
-
-### Verify Face (Attendance Clock-in)
-```http
-POST /api/verify
-Content-Type: application/json
-
-{
-  "employee_id": "EMP001",
-  "image": "base64_encoded_image"
-}
-```
-
-**Response:**
-```json
-{
-  "match": true,
-  "confidence": 0.97,
-  "employee_id": "EMP001",
-  "liveness": true,
-  "processing_time_ms": 312
-}
-```
-
-### Health Check
-```http
-GET /api/health
-```
-
----
-
-## 🎯 Performance
-
-| Metric | Value |
-|--------|-------|
-| Verification Accuracy | **98.3%** on test dataset |
-| False Acceptance Rate | < 0.5% |
-| False Rejection Rate | < 1.7% |
-| Average Response Time | **~350ms** |
-| Liveness Detection | ✅ Active |
-
----
-
-## 🐳 Docker Deployment
-
-```dockerfile
-FROM python:3.10-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-COPY . .
-EXPOSE 5000
-CMD ["python", "app.py"]
-```
-
-```bash
-docker build -t face-recognition-service .
-docker run -p 5000:5000 face-recognition-service
-```
-
----
-
-## 🔗 Related Repositories
-
-| Repo | Description |
-|------|-------------|
-| [smart-employee-portal-backend](https://github.com/yasirmalik36/smart-employee-portal-backend) | .NET Core 8 main API |
-| [smart-employee-portal-frontend](https://github.com/yasirmalik36/smart-employee-portal-frontend) | Angular 17 frontend |
-
----
-
-## 🤝 Author
-
-**Yasir Mehmood** — Senior Full-Stack & AI Engineer
-
-[![Portfolio](https://img.shields.io/badge/Portfolio-Visit-1B3A6B?style=flat-square)](https://yasir-portfolio-omega.vercel.app)
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-0077B5?style=flat-square&logo=linkedin)](https://linkedin.com/in/yasir-mehmood-53549a1b3)
-[![Email](https://img.shields.io/badge/Email-Contact-D14836?style=flat-square&logo=gmail)](mailto:yash36114@gmail.com)
-
----
+- [smart-employee-portal-backend](https://github.com/yasirmalik36/smart-employee-portal-backend) — .NET 8 API
+- [smart-employee-portal-frontend](https://github.com/yasirmalik36/smart-employee-portal-frontend) — Angular 17 UI
 
 ## 📄 License
 
-MIT License — see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE).
+
+---
+
+<div align="center">
+
+Built by **[Yasir Mehmood](https://yasir-portfolio-omega.vercel.app)** · [LinkedIn](https://linkedin.com/in/yasir-mehmood-53549a1b3) · [GitHub](https://github.com/yasirmalik36)
+
+</div>
