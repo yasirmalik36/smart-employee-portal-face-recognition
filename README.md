@@ -10,6 +10,12 @@
 
 ---
 
+## 📸 Screenshot
+
+The interactive API docs (`/docs`), served by the running service:
+
+![Face Recognition API docs](docs/screenshots/api-docs.png)
+
 ## ✨ What it does
 
 | Capability | How it works |
