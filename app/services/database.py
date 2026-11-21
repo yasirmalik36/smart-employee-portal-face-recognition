@@ -1,15 +1,16 @@
 import pyodbc
+from fastapi import HTTPException
+
 from app.config import settings  # Import global settings
+
 
 def get_db_connection():
     """ Establishes a connection to SQL Server """
-    conn = pyodbc.connect(settings.DB_CONNECTION_STRING)
-    return conn
-
+    return pyodbc.connect(settings.DB_CONNECTION_STRING)
 
 
 def execute_query(query, params):
-    """Executes an SQL query with optional parameters."""
+    """Executes an SQL query with optional parameters. Returns the number of rows affected."""
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
@@ -18,11 +19,13 @@ def execute_query(query, params):
         else:
             cursor.execute(query)
         conn.commit()
-    except Exception as e:
+        return cursor.rowcount
+    except Exception:
         conn.rollback()
-        raise e
+        raise
     finally:
         conn.close()
+
 
 def fetch_all(query, params=None):
     """Fetches all results for a given query."""
@@ -37,63 +40,53 @@ def fetch_all(query, params=None):
     finally:
         conn.close()
 
+
 def execute_query_with_output(query, params):
     """
-    Executes a stored procedure with output parameters and returns the result.
-
-    Args:
-        query: The SQL query (stored procedure call) with output parameters.
-        params: A tuple or list of parameters for the query.
+    Executes a stored procedure that returns a single (Code, Message, Description) row.
 
     Returns:
-        A dictionary containing (Code, Message, Desc) or None on error.
+        A dictionary containing Code, Message, Description, or None on error.
     """
+    conn = None
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-
-        # Execute the stored procedure only once
         cursor.execute(query, params)
-
-        # Fetch the result set containing the output parameters
         result = cursor.fetchone()
-        print(result)
-
-        # Commit the transaction
         conn.commit()
-
         cursor.close()
-        conn.close()
 
         if result:
-            # Assuming the result tuple has columns in the order: Code, Message, Desc
             return {
-                'Code': result[0],  # Access the first element (Code)
-                'Message': result[1], # Access the second element (Message)
-                'Description': result[2]    # Access the third element (Desc)
+                'Code': result[0],
+                'Message': result[1],
+                'Description': result[2],
             }
-        else:
-            return None
+        return None
 
     except pyodbc.Error as ex:
-        conn.rollback()
-        sqlstate = ex.args[0]
-        print(f"Database error: {sqlstate}, {ex}")
+        if conn is not None:
+            conn.rollback()
+        print(f"Database error: {ex.args[0]}, {ex}")
         return None
     except Exception as e:
-        conn.rollback()
+        if conn is not None:
+            conn.rollback()
         print(f"An error occurred: {e}")
         return None
-
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def delete_record(table_name: str, conditions: str, values: tuple):
     """
-    Generic function to delete a record from a database table.
+    Generic function to delete records from a database table.
 
-    :param table_name: The name of the table
-    :param conditions: The WHERE clause conditions (e.g., "EmployeeID=? AND IsDeleted=0")
-    :param values: Tuple of values to pass into the query
+    NOTE: table_name and conditions are inserted into the SQL text directly, so they must
+    only ever come from code, never from user input. Pass user values through `values`.
+
     :return: Number of rows affected
     """
     try:
@@ -101,52 +94,3 @@ def delete_record(table_name: str, conditions: str, values: tuple):
         return execute_query(query, values)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database deletion error: {str(e)}")
-
-
-def execute_query_with_output(query, params):
-    """
-    Executes a stored procedure with output parameters and returns the result.
-
-    Args:
-        query: The SQL query (stored procedure call) with output parameters.
-        params: A tuple or list of parameters for the query.
-
-    Returns:
-        A dictionary containing (Code, Message, Desc) or None on error.
-    """
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        # Execute the stored procedure only once
-        cursor.execute(query, params)
-
-        # Fetch the result set containing the output parameters
-        result = cursor.fetchone()
-        print(result)
-
-        # Commit the transaction
-        conn.commit()
-
-        cursor.close()
-        conn.close()
-
-        if result:
-            # Assuming the result tuple has columns in the order: Code, Message, Desc
-            return {
-                'Code': result[0],  # Access the first element (Code)
-                'Message': result[1], # Access the second element (Message)
-                'Description': result[2]    # Access the third element (Desc)
-            }
-        else:
-            return None
-
-    except pyodbc.Error as ex:
-        conn.rollback()
-        sqlstate = ex.args[0]
-        print(f"Database error: {sqlstate}, {ex}")
-        return None
-    except Exception as e:
-        conn.rollback()
-        print(f"An error occurred: {e}")
-        return None

@@ -1,5 +1,7 @@
 import os
 import shutil
+import tempfile
+import uuid
 import numpy as np
 import cv2
 import faiss
@@ -69,7 +71,11 @@ def extract_face_embedding(image_path: str) -> np.ndarray:
 def save_face_image(employee_id: int, image_file: UploadFile) -> str:
     employee_folder = os.path.join(IMAGE_FOLDER, f"employee_{employee_id}")
     os.makedirs(employee_folder, exist_ok=True)
-    image_path = os.path.join(employee_folder, image_file.filename)
+    # Never trust the client-supplied filename (path traversal like "../../x"); generate our own.
+    ext = os.path.splitext(image_file.filename or "")[1].lower()
+    if ext not in (".jpg", ".jpeg", ".png", ".bmp", ".webp"):
+        ext = ".jpg"
+    image_path = os.path.join(employee_folder, f"{uuid.uuid4().hex}{ext}")
     with open(image_path, "wb") as buffer:
         shutil.copyfileobj(image_file.file, buffer)
     return image_path
@@ -101,9 +107,11 @@ async def save_face(employee_id: int = Form(...), created_by: str = Form(...), i
 # Verify face by matching the uploaded image with existing database
 @router.post("/verify-face")
 async def verify_face(image_file: UploadFile = File(...)):
+    # A unique temp file per request. A single shared "temp.jpg" let two simultaneous
+    # requests overwrite each other's image, so one person could be matched as another.
+    fd, temp_image_path = tempfile.mkstemp(suffix=".jpg")
     try:
-        temp_image_path = os.path.join(IMAGE_FOLDER, "temp.jpg")
-        with open(temp_image_path, "wb") as buffer:
+        with os.fdopen(fd, "wb") as buffer:
             shutil.copyfileobj(image_file.file, buffer)
 
         # Extract face embedding
@@ -154,9 +162,17 @@ async def verify_face(image_file: UploadFile = File(...)):
 
     except Exception as e:
         return {"code": "500", "message": "Failure", "description": f"Error during face verification: {str(e)}"}
+    finally:
+        try:
+            os.remove(temp_image_path)
+        except OSError:
+            pass
 
-# Check liveness to verify the person is real
-@router.post("/check-liveness/")
+# Check liveness to verify the person is real.
+# The .NET backend calls "/check-liveness" (no trailing slash); the old route only matched
+# "/check-liveness/", which caused a redirect that drops the uploaded file. Accept both.
+@router.post("/check-liveness")
+@router.post("/check-liveness/", include_in_schema=False)
 async def check_liveness_endpoint(file: UploadFile = File(...)):
     try:
         image_bytes = await file.read()
@@ -177,14 +193,16 @@ async def delete_face(employee_id: int):
         if not result:
             return {"code": "404", "message": "Failure", "description": "Face not found for the given Employee ID"}
 
-        face_id, image_path = result[0]
         delete_record("EmployeeFaces", "EmployeeID=? AND IsDeleted=0 AND IsActive=1", (employee_id,))
 
-        if image_path and os.path.exists(image_path):
-            os.remove(image_path)
-            employee_folder = os.path.dirname(image_path)
-            if os.path.exists(employee_folder) and not os.listdir(employee_folder):
-                os.rmdir(employee_folder)
+        # The DELETE removes every matching row, so remove every matching image too
+        # (previously only the first one was deleted and the rest stayed on disk).
+        for _face_id, image_path in result:
+            if image_path and os.path.exists(image_path):
+                os.remove(image_path)
+                employee_folder = os.path.dirname(image_path)
+                if os.path.exists(employee_folder) and not os.listdir(employee_folder):
+                    os.rmdir(employee_folder)
         load_existing_embeddings()
 
         return {"code": "00", "message": "Success", "description": "Face deleted successfully"}
